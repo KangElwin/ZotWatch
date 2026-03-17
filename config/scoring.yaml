@@ -15,3 +15,7 @@ decay_days:
   slow: 30
 whitelist_authors: []
 whitelist_venues: []
+fuzzy_grey:
+  enabled: true
+  rho: 0.5
+  fuzzy_weight: 0.4
