@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .faiss_store import FaissIndex
+from .fuzzy_grey import fuzzy_grey_scores
 from .models import CandidateWork, RankedWork
 from .settings import Settings
 from .vectorizer import TextVectorizer
@@ -79,27 +80,41 @@ class WorkRanker:
         weights = self.settings.scoring.weights
         thresholds = self.settings.scoring.thresholds
 
-        ranked: List[RankedWork] = []
-        for candidate, vector, distance in zip(candidates, vectors, distances):
+        # Collect per-candidate raw sub-scores first (needed for fuzzy-grey path)
+        raw: List[Tuple[float, float, float, float, float, float, float]] = []
+        for candidate, distance in zip(candidates, distances):
             similarity = float(distance[0]) if distance.size else 0.0
             recency_score = _compute_recency(candidate.published, self.settings)
             citation_score, altmetric_score = _compute_metric(candidate)
-            journal_quality, journal_sjr = _journal_quality_score(candidate.venue, self.journal_metrics)
+            journal_quality, _ = _journal_quality_score(candidate.venue, self.journal_metrics)
             author_bonus = _bonus(candidate.authors, self.settings.scoring.whitelist_authors)
             venue_bonus = _bonus(
                 [candidate.venue] if candidate.venue else [],
                 self.settings.scoring.whitelist_venues,
             )
+            raw.append((similarity, recency_score, citation_score, altmetric_score,
+                        journal_quality, author_bonus, venue_bonus))
 
-            score = (
-                similarity * weights.similarity
-                + recency_score * weights.recency
-                + citation_score * weights.citations
-                + altmetric_score * weights.altmetric
-                + journal_quality * getattr(weights, "journal_quality", 0.0)
-                + author_bonus * weights.author_bonus
-                + venue_bonus * weights.venue_bonus
+        # --- Scoring path --------------------------------------------------
+        fg_cfg = self.settings.scoring.fuzzy_grey
+        if fg_cfg.enabled and len(candidates) > 1:
+            logger.info(
+                "Using Fuzzy-Grey comprehensive evaluation (rho=%.2f, fuzzy_weight=%.2f)",
+                fg_cfg.rho,
+                fg_cfg.fuzzy_weight,
             )
+            scores = self._fuzzy_grey_rank(raw, weights, fg_cfg)
+        else:
+            logger.info("Using linear weighted scoring")
+            scores = self._linear_rank(raw, weights)
+
+        # --- Build RankedWork objects ---------------------------------------
+        ranked: List[RankedWork] = []
+        for candidate, vector, distance, raw_scores, score in zip(
+            candidates, vectors, distances, raw, scores
+        ):
+            similarity, recency_score, citation_score, altmetric_score, journal_quality, author_bonus, venue_bonus = raw_scores
+            _, journal_sjr = _journal_quality_score(candidate.venue, self.journal_metrics)
 
             label = "ignore"
             if score >= thresholds.must_read:
@@ -123,6 +138,51 @@ class WorkRanker:
             )
         ranked.sort(key=lambda w: w.score, reverse=True)
         return ranked
+
+    # ------------------------------------------------------------------
+    # Internal scoring helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _indicator_weights(weights) -> np.ndarray:
+        """Return a numpy array of weights in indicator order."""
+        return np.array([
+            weights.similarity,
+            weights.recency,
+            weights.citations,
+            weights.altmetric,
+            getattr(weights, "journal_quality", 0.0),
+            weights.author_bonus,
+            weights.venue_bonus,
+        ], dtype=float)
+
+    def _linear_rank(self, raw, weights) -> List[float]:
+        """Classic linear weighted sum scoring."""
+        scores: List[float] = []
+        for similarity, recency_score, citation_score, altmetric_score, journal_quality, author_bonus, venue_bonus in raw:
+            score = (
+                similarity * weights.similarity
+                + recency_score * weights.recency
+                + citation_score * weights.citations
+                + altmetric_score * weights.altmetric
+                + journal_quality * getattr(weights, "journal_quality", 0.0)
+                + author_bonus * weights.author_bonus
+                + venue_bonus * weights.venue_bonus
+            )
+            scores.append(score)
+        return scores
+
+    def _fuzzy_grey_rank(self, raw, weights, fg_cfg) -> List[float]:
+        """Fuzzy-Grey comprehensive evaluation scoring."""
+        indicator_matrix = np.array(raw, dtype=float)  # (n, 7)
+        w = self._indicator_weights(weights)
+        combined = fuzzy_grey_scores(
+            indicator_matrix,
+            w,
+            rho=fg_cfg.rho,
+            fuzzy_weight=fg_cfg.fuzzy_weight,
+        )
+        return combined.tolist()
 
 
 def _bonus(values: List[str], whitelist: List[str]) -> float:

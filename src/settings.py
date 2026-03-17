@@ -102,6 +102,26 @@ class Thresholds(BaseModel):
     consider: float = 0.5
 
 
+class FuzzyGreyConfig(BaseModel):
+    """Configuration for the improved Fuzzy-Grey comprehensive evaluation method."""
+
+    enabled: bool = True
+    rho: float = 0.5
+    fuzzy_weight: float = 0.4
+
+    @validator("rho")
+    def validate_rho(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError(f"rho must be in (0, 1], got {value}")
+        return value
+
+    @validator("fuzzy_weight")
+    def validate_fuzzy_weight(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"fuzzy_weight must be in [0, 1], got {value}")
+        return value
+
+
 class ScoringConfig(BaseModel):
     weights: ScoreWeights = Field(default_factory=ScoreWeights)
     thresholds: Thresholds = Field(default_factory=Thresholds)
@@ -110,6 +130,7 @@ class ScoringConfig(BaseModel):
     )
     whitelist_authors: List[str] = Field(default_factory=list)
     whitelist_venues: List[str] = Field(default_factory=list)
+    fuzzy_grey: FuzzyGreyConfig = Field(default_factory=FuzzyGreyConfig)
 
 
 class Settings(BaseModel):
@@ -158,4 +179,5 @@ __all__ = [
     "ZoteroConfig",
     "SourcesConfig",
     "ScoringConfig",
+    "FuzzyGreyConfig",
 ]
